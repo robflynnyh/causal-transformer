@@ -194,7 +194,8 @@ class transformer(nn.Module):
         ff_mult = kwargs.get('ff_mult', 4)
         self.stocastic_depth = kwargs.get('stocastic_depth', False) # https://arxiv.org/pdf/2102.03216.pdf
         self.stocastic_depth_prob = kwargs.get('stocastic_depth_prob', 0.7)
-     
+        print('stocastic depth ', self.stocastic_depth)
+
         self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
 
         self.intermediate_loss = intermediate_loss
@@ -255,7 +256,6 @@ class transformer(nn.Module):
             survived = torch.bernoulli(survival_prob).bool()
             layer_multiplier = 1 / survival_prob
             return layer_multiplier, survived
-
             
 
     def forward(self, x, mask=None, self_condtioning=None):
@@ -265,8 +265,9 @@ class transformer(nn.Module):
             if drop:
                 continue
 
-            x = self.checkpoint(i, attn, x, self.positional_bias, mask) * layer_mult + x 
-            x = self.checkpoint(i, ff, x) * layer_mult + x 
+            x = self.checkpoint(i, attn, x, self.positional_bias, mask) + x 
+            x = self.checkpoint(i, ff, x) + x
+            x *= layer_mult 
 
             if i < self.depth - 1 and self_condtioning is not None:
                 x, logits = self_condtioning(x)
