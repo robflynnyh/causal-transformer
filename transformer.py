@@ -95,26 +95,30 @@ class CosineAttention(nn.Module):
     ):
         super().__init__()
         assert activation in ['relusq', 'softmax']
-        self.n_feats = n_feats
-        self.head_dim = head_dim
-        self.n_heads = n_heads
+        self.shared_kv = kwargs.get('shared_kv', False)
+
+        self.n_feats, self.head_dim, self.n_heads = n_feats, head_dim, n_heads
         self.dropout = nn.Dropout(dropout)
         self.bias = bias
         self.return_attention = return_attention
-
         self.causal = causal
 
         self.temperature = torch.nn.Parameter(torch.tensor(temperature), requires_grad=True) if isinstance(temperature, float) else temperature
 
         self.activation = ReLUSquared() if activation == 'relusq' else nn.Softmax(dim=-1)
 
-        self.qkv_proj = nn.Linear(n_feats, 3 * n_heads * head_dim, bias=bias)
+        if not self.shared_kv:
+            self.qkv_proj = nn.Linear(n_feats, 3 * n_heads * head_dim, bias=bias)
+            self.qkv = lambda x: rearrange(self.qkv_proj(x), "b n (h d qkv) -> qkv b h n d", qkv=3, h=n_heads, d=head_dim)
+        else:
+            self.q_proj, self.kv_proj = [nn.Linear(n_feats, el, bias=bias) for el in [n_heads * head_dim, 2 * head_dim]]
+            map_q, map_kv = lambda q: rearrange(q, 'b n (h d) -> b h n d', h=n_heads), lambda kv: rearrange(kv, 'b n (kv d) -> kv b () n d', kv=2, d=head_dim)
+            self.qkv = lambda x: (map_q(self.q_proj(x)), *map_kv(self.kv_proj(x)))
+
         self.out_proj = nn.Linear(n_heads * head_dim, n_feats, bias=bias)
 
 
-    def attend(self, qkv, mask, pos_fn):
-        query, key, value = qkv
-        
+    def attend(self, query, key, value, mask, pos_fn):
         query, key = map(l2norm, (query, key))
 
         dots = einsum('bhid,bhjd->bhij', query, key) * self.temperature
@@ -142,9 +146,9 @@ class CosineAttention(nn.Module):
         if mask is None:
             mask = torch.zeros(B, N, device=x.device, dtype=torch.bool)
 
-        qkv = rearrange(self.qkv_proj(x), "b n (h d qkv) -> qkv b h n d", qkv=3, h=H, d=D) # qkv projection
+        q, k, v = self.qkv(x)
     
-        out = self.attend(qkv, mask, pos_fn)
+        out = self.attend(q, k, v, mask, pos_fn)
 
         out = rearrange(out, "b h n d -> b n (h d)")
         out = self.out_proj(out)
@@ -184,7 +188,6 @@ class transformer(nn.Module):
             shared_temperture=False,
             intermediate_loss=True,
             dropout = 0.1,
-            checkpoint = True,
             **kwargs
         ):
         super().__init__()
@@ -192,9 +195,7 @@ class transformer(nn.Module):
             intermediate_loss = False
 
         ff_mult = kwargs.get('ff_mult', 4)
-        self.stocastic_depth = kwargs.get('stocastic_depth', False) # https://arxiv.org/pdf/2102.03216.pdf
-        self.stocastic_depth_prob = kwargs.get('stocastic_depth_prob', 0.7)
-        print('stocastic depth ', self.stocastic_depth)
+        self.checkpoint_every_n = kwargs.get('checkpoint_every_n', 0)
 
         self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
 
@@ -209,7 +210,6 @@ class transformer(nn.Module):
             norm = False
         )
 
-        self.grad_checkpointing = checkpoint
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -240,49 +240,27 @@ class transformer(nn.Module):
         return custom_forward
 
     def checkpoint(self, layer, module, *args, **kwargs):
-        condition = self.training and self.grad_checkpointing and layer < self.depth - 1
+        condition = self.training and self.checkpoint_every_n != 0 and layer < self.depth - 1 and layer % self.checkpoint_every_n == 0
         return checkpoint(self.create_custom_forward(module), *args, **kwargs) if condition else module(*args, **kwargs)
-
-    def survival_probability(self, layer):
-        return 1 - (layer / self.depth)*(1 - self.stocastic_depth_prob)
-    
-    def layer_dropout(self, _layer):
-        layer = _layer + 1
-        layer_multiplier = 1.0
-        if not self.training or not self.stocastic_depth:
-            return layer_multiplier, False
-        else:
-            survival_prob = torch.tensor(self.survival_probability(layer))
-            survived = torch.bernoulli(survival_prob).bool()
-            layer_multiplier = 1 / survival_prob
-            return layer_multiplier, survived
-            
 
     def forward(self, x, mask=None, self_condtioning=None):
         intermediate_logits = []
         for i, (attn, ff) in enumerate(self.layers):
-            layer_mult, drop = self.layer_dropout(i)
-            if drop:
-                continue
 
-            x = self.checkpoint(i, attn, x, self.positional_bias, mask) + x 
-            x = self.checkpoint(i, ff, x) + x
-            x *= layer_mult 
+            x = self.checkpoint(i, attn, x, self.positional_bias, mask) + x
+            x = self.checkpoint(i, ff, x) + x   
 
             if i < self.depth - 1 and self_condtioning is not None:
                 x, logits = self_condtioning(x)
                 intermediate_logits.append(logits)
 
-        # stack intermediate logits
-        if len(intermediate_logits) > 0:
-            intermediate_logits = torch.stack(intermediate_logits, dim=0) # D x B x N x V
-
+        if len(intermediate_logits) > 0: # stack intermediate logits
+            intermediate_logits = torch.stack(intermediate_logits, dim=0) # D x B x N x L
+    
         return x, intermediate_logits
 
 class shared_embedding_output_layer(nn.Module):
-    '''
-    Pass a embedding layer and then use this module as the output layer
-    '''
+    '''Pass a embedding layer and then use this module as the output layer'''
     def __init__(self, embedding_layer, bias=False):
         super().__init__()
         self.embedding_layer = embedding_layer
