@@ -5,6 +5,40 @@ from torch import einsum
 from torch.utils.checkpoint import checkpoint # # gradient/activation checkpointing
 from functools import partial
 
+def exists(val):
+    return val is not None
+
+# token shifting
+# lucidrains implementation: https://github.com/lucidrains/x-transformers/blob/main/x_transformers/x_transformers.py
+# BlinkDL idea from RWKV-LM https://github.com/BlinkDL/RWKV-LM
+def shift(t, amount, mask = None):
+    if amount == 0:
+        return t
+    else:
+        amount = min(amount, t.shape[1])
+
+    if exists(mask):
+        t = t.masked_fill(~mask[..., None], 0.)
+
+    return F.pad(t, (0, 0, amount, -amount), value = 0.)
+
+class ShiftTokens(nn.Module):
+    def __init__(self, shifts, fn):
+        super().__init__()
+        self.fn = fn
+        self.shifts = tuple(shifts)
+
+    def forward(self, x, **kwargs):
+        mask = kwargs.get('mask', None)
+        shifts = self.shifts
+        segments = len(shifts)
+        feats_per_shift = x.shape[-1] // segments
+        splitted = x.split(feats_per_shift, dim = -1)
+        segments_to_shift, rest = splitted[:segments], splitted[segments:]
+        segments_to_shift = list(map(lambda args: shift(*args, mask = mask), zip(segments_to_shift, shifts)))
+        x = torch.cat((*segments_to_shift, *rest), dim = -1)
+        return self.fn(x, **kwargs)
+
 
 class DynamicPositionBias(nn.Module):
     '''taken From Phil Wang's x-transformers library'''
@@ -96,6 +130,7 @@ class CosineAttention(nn.Module):
         super().__init__()
         assert activation in ['relusq', 'softmax']
         self.shared_kv = kwargs.get('shared_kv', False)
+        self.single_head_MoS = kwargs.get('single_head_MoS', False)
 
         self.n_feats, self.head_dim, self.n_heads = n_feats, head_dim, n_heads
         self.dropout = nn.Dropout(dropout)
@@ -103,20 +138,24 @@ class CosineAttention(nn.Module):
         self.return_attention = return_attention
         self.causal = causal
 
+        if self.single_head_MoS:
+            self.shared_kv, self.n_heads = False, 1
+
         self.temperature = torch.nn.Parameter(torch.tensor(temperature), requires_grad=True) if isinstance(temperature, float) else temperature
 
         self.activation = ReLUSquared() if activation == 'relusq' else nn.Softmax(dim=-1)
 
         if not self.shared_kv:
-            self.qkv_proj = nn.Linear(n_feats, 3 * n_heads * head_dim, bias=bias)
-            self.qkv = lambda x: rearrange(self.qkv_proj(x), "b n (h d qkv) -> qkv b h n d", qkv=3, h=n_heads, d=head_dim)
+            self.qkv_proj = nn.Linear(n_feats, 3 * self.n_heads * head_dim, bias=bias)
+            self.qkv = lambda x: rearrange(self.qkv_proj(x), "b n (h d qkv) -> qkv b h n d", qkv=3, h=self.n_heads, d=head_dim)
         else:
-            self.q_proj, self.kv_proj = [nn.Linear(n_feats, el, bias=bias) for el in [n_heads * head_dim, 2 * head_dim]]
-            map_q, map_kv = lambda q: rearrange(q, 'b n (h d) -> b h n d', h=n_heads), lambda kv: rearrange(kv, 'b n (kv d) -> kv b () n d', kv=2, d=head_dim)
+            self.q_proj, self.kv_proj = [nn.Linear(n_feats, el, bias=bias) for el in [self.n_heads * head_dim, 2 * head_dim]]
+            map_q, map_kv = lambda q: rearrange(q, 'b n (h d) -> b h n d', h=self.n_heads), lambda kv: rearrange(kv, 'b n (kv d) -> kv b () n d', kv=2, d=head_dim)
             self.qkv = lambda x: (map_q(self.q_proj(x)), *map_kv(self.kv_proj(x)))
 
         self.out_proj = nn.Linear(n_heads * head_dim, n_feats, bias=bias)
-
+    
+       
 
     def attend(self, query, key, value, mask, pos_fn):
         query, key = map(l2norm, (query, key))
@@ -133,7 +172,8 @@ class CosineAttention(nn.Module):
         
         dots.masked_fill_(attn_mask, -torch.finfo(dots.dtype).max)
     
-        attn = self.activation(dots)   
+        attn = self.activation(dots)
+     
         attn = self.dropout(attn)
         return einsum("bhij,bhjd->bhid", attn, value)
 
@@ -196,8 +236,13 @@ class transformer(nn.Module):
 
         ff_mult = kwargs.get('ff_mult', 4)
         self.checkpoint_every_n = kwargs.get('checkpoint_every_n', 0)
+        self.single_head_MoS = kwargs.get('single_head_MoS', False)
+        self.token_shift = kwargs.get('token_shift', False)
 
-        self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
+        if not self.single_head_MoS:
+            self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
+        else:
+            self.temperature = nn.Parameter(torch.ones(1, 8, 1, 1) * temperature + torch.randn(1, 8, 1, 1) * 0.1, requires_grad=True)
 
         self.intermediate_loss = intermediate_loss
 
@@ -209,6 +254,10 @@ class transformer(nn.Module):
             log_distance = False,
             norm = False
         )
+
+        if self.token_shift:
+            token_shift = ShiftTokens(range(0, 2), nn.Identity())
+        self.token_shift = lambda x: token_shift(x) if self.token_shift else x
 
         self.layers = nn.ModuleList([])
         for _ in range(depth):
@@ -247,6 +296,7 @@ class transformer(nn.Module):
         intermediate_logits = []
         for i, (attn, ff) in enumerate(self.layers):
 
+            x = self.token_shift(x)
             x = self.checkpoint(i, attn, x, self.positional_bias, mask) + x
             x = self.checkpoint(i, ff, x) + x   
 
