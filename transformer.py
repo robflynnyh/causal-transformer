@@ -130,7 +130,7 @@ class CosineAttention(nn.Module):
         super().__init__()
         assert activation in ['relusq', 'softmax']
         self.shared_kv = kwargs.get('shared_kv', False)
-        self.single_head_MoS = kwargs.get('single_head_MoS', False)
+        self.talking_heads = kwargs.get('talking_heads', False)
 
         self.n_feats, self.head_dim, self.n_heads = n_feats, head_dim, n_heads
         self.dropout = nn.Dropout(dropout)
@@ -138,30 +138,35 @@ class CosineAttention(nn.Module):
         self.return_attention = return_attention
         self.causal = causal
 
-        if self.single_head_MoS:
-            self.shared_kv, self.n_heads = False, 1
+        if self.talking_heads:
+            self._head_proj = nn.Conv2d(n_heads, n_heads, (1, 1))
 
         self.temperature = torch.nn.Parameter(torch.tensor(temperature), requires_grad=True) if isinstance(temperature, float) else temperature
 
         self.activation = ReLUSquared() if activation == 'relusq' else nn.Softmax(dim=-1)
 
         if not self.shared_kv:
-            self.qkv_proj = nn.Linear(n_feats, 3 * self.n_heads * head_dim, bias=bias)
-            self.qkv = lambda x: rearrange(self.qkv_proj(x), "b n (h d qkv) -> qkv b h n d", qkv=3, h=self.n_heads, d=head_dim)
+            self.qkv_proj = nn.Linear(n_feats, 3 * n_heads * head_dim, bias=bias)
+            self.qkv = lambda x: rearrange(self.qkv_proj(x), "b n (h d qkv) -> qkv b h n d", qkv=3, h=n_heads, d=head_dim)
         else:
-            self.q_proj, self.kv_proj = [nn.Linear(n_feats, el, bias=bias) for el in [self.n_heads * head_dim, 2 * head_dim]]
-            map_q, map_kv = lambda q: rearrange(q, 'b n (h d) -> b h n d', h=self.n_heads), lambda kv: rearrange(kv, 'b n (kv d) -> kv b () n d', kv=2, d=head_dim)
+            self.q_proj, self.kv_proj = [nn.Linear(n_feats, el, bias=bias) for el in [n_heads * head_dim, 2 * head_dim]]
+            map_q, map_kv = lambda q: rearrange(q, 'b n (h d) -> b h n d', h=n_heads), lambda kv: rearrange(kv, 'b n (kv d) -> kv b () n d', kv=2, d=head_dim)
             self.qkv = lambda x: (map_q(self.q_proj(x)), *map_kv(self.kv_proj(x)))
 
         self.out_proj = nn.Linear(n_heads * head_dim, n_feats, bias=bias)
     
-       
+    def head_proj(self, dots):
+        if not self.talking_heads:
+            return dots
+        dots = self._head_proj(dots)
+        return dots      
 
     def attend(self, query, key, value, mask, pos_fn):
         query, key = map(l2norm, (query, key))
 
         dots = einsum('bhid,bhjd->bhij', query, key) * self.temperature
-  
+        dots = self.head_proj(dots)
+
         dots += pos_fn(dots.shape[-1], device=dots.device, dtype=dots.dtype)
         qkmask = ~mask
         attn_mask = ~(rearrange(qkmask, "b n -> b () n ()") * rearrange(qkmask, "b n -> b () () n"))
@@ -236,13 +241,11 @@ class transformer(nn.Module):
 
         ff_mult = kwargs.get('ff_mult', 4)
         self.checkpoint_every_n = kwargs.get('checkpoint_every_n', 0)
-        self.single_head_MoS = kwargs.get('single_head_MoS', False)
         self.token_shift = kwargs.get('token_shift', False)
 
-        if not self.single_head_MoS:
-            self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
-        else:
-            self.temperature = nn.Parameter(torch.ones(1, 8, 1, 1) * temperature + torch.randn(1, 8, 1, 1) * 0.1, requires_grad=True)
+
+        self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
+    
 
         self.intermediate_loss = intermediate_loss
 
@@ -255,9 +258,10 @@ class transformer(nn.Module):
             norm = False
         )
 
+        self.token_shifter = lambda x: x
         if self.token_shift:
-            token_shift = ShiftTokens(range(0, 2), nn.Identity())
-        self.token_shift = lambda x: token_shift(x) if self.token_shift else x
+            self.token_shifter = ShiftTokens(range(0, 2), nn.Identity())
+        self.token_shift = lambda x: self.token_shifter(x)
 
         self.layers = nn.ModuleList([])
         for _ in range(depth):
