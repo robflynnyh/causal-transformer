@@ -164,10 +164,7 @@ class CosineAttention(nn.Module):
     def attend(self, query, key, value, mask, pos_fn):
         query, key = map(l2norm, (query, key))
 
-        query, key = map(lambda t: rearrange(t, 'b h n d -> (b h) n d'), (query, key))
-        dots = torch.badmm(torch.tensor(0), query, key.transpose(-1, -2), beta=0, alpha=self.temperature)
-        dots = rearrange(dots, '(b h) n m -> b h n m', h=self.n_heads)
-
+        dots = einsum('bhid,bhjd->bhij', query, key) * self.temperature
         dots = self.head_proj(dots)
 
         dots += pos_fn(dots.shape[-1], device=dots.device, dtype=dots.dtype)
