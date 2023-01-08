@@ -130,7 +130,7 @@ class CosineAttention(nn.Module):
         super().__init__()
         assert activation in ['relusq', 'softmax']
         self.shared_kv = kwargs.get('shared_kv', False)
-        self.talking_heads = kwargs.get('talking_heads', False)
+        self.talking_heads = kwargs.get('talking_heads', 'none') # 'none', 'pre', 'both', 'post' 
 
         self.n_feats, self.head_dim, self.n_heads = n_feats, head_dim, n_heads
         self.dropout = nn.Dropout(dropout)
@@ -155,17 +155,19 @@ class CosineAttention(nn.Module):
 
         self.out_proj = nn.Linear(n_heads * head_dim, n_feats, bias=bias)
     
-    def head_proj(self, dots):
-        if not self.talking_heads:
-            return dots
-        dots = self._head_proj(dots)
+    def head_proj(self, dots, mode='pre'):
+        if mode == 'pre' and (self.talking_heads == 'pre' or self.talking_heads == 'both'):
+            dots = self._head_proj(dots)
+        if mode == 'post' and (self.talking_heads == 'post' or self.talking_heads == 'both'):
+            dots = self._head_proj_post(dots)
         return dots      
+  
 
     def attend(self, query, key, value, mask, pos_fn):
         query, key = map(l2norm, (query, key))
 
         dots = einsum('bhid,bhjd->bhij', query, key) * self.temperature
-        dots = self.head_proj(dots)
+        dots = self.head_proj(dots, mode='pre')
 
         dots += pos_fn(dots.shape[-1], device=dots.device, dtype=dots.dtype)
         qkmask = ~mask
@@ -178,6 +180,7 @@ class CosineAttention(nn.Module):
         dots.masked_fill_(attn_mask, -torch.finfo(dots.dtype).max)
     
         attn = self.activation(dots)
+        attn = self.head_proj(attn, mode='post')
      
         attn = self.dropout(attn)
         return einsum("bhij,bhjd->bhid", attn, value)
