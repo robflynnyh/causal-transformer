@@ -133,8 +133,11 @@ class CosineAttention(nn.Module):
         self.return_attention = return_attention
         self.causal = causal
 
-        if self.talking_heads:
+        if self.talking_heads == 'pre' or self.talking_heads == 'both':
             self._head_proj = nn.Conv2d(n_heads, n_heads, (1, 1))
+        if self.talking_heads == 'post' or self.talking_heads == 'both':
+            self._head_proj_post = nn.Conv2d(n_heads, n_heads, (1, 1))
+            
 
         self.temperature = torch.nn.Parameter(torch.tensor(temperature), requires_grad=True) if isinstance(temperature, float) else temperature
 
