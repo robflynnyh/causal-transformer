@@ -340,10 +340,10 @@ class transformer(nn.Module):
         diagonal_offset = torch.arange(x_len.max(), device=x.device)[None,:,None]
         ##
         ## positional stuff ##
-        positional_grid = causal_mask - cache_offset - diagonal_offset 
+        positional_grid = (causal_mask - cache_offset - diagonal_offset) * -1
         pos = torch.arange(positional_grid.min(), positional_grid.max()+1, device=x.device, dtype=x.dtype)[:,None]
         min_cache_len = 0 if cache_len.__class__ == int else cache_len.min()
-        positional_indices = ((positional_grid*-1) + (total_len.max() - min_cache_len - 1)) # shift so zero is the smallest number
+        positional_indices = ((positional_grid) + (total_len.max() - min_cache_len - 1)) # shift so zero is the smallest number
         pos_bias = self.positional_bias(pos=pos, indices=positional_indices, dtype=x.dtype, device=x.device)
         ## positional stuff ##
         ##
