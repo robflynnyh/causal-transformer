@@ -335,13 +335,13 @@ class transformer(nn.Module):
         attn_mask = ~(rearrange(~q_mask, "b n -> b () n ()") * rearrange(~kv_mask, "b n -> b () () n"))
         ##
         ##
-        causal_mask = repeat(torch.arange(total_len.max()), 'i -> b r i', b=len(total_len), r=x_len.max())
+        causal_mask = repeat(torch.arange(total_len.max(), device=x.device), 'i -> b r i', b=len(total_len), r=x_len.max())
         cache_offset = cache_len[:,None,None] if exists(cache) else cache_len
-        diagonal_offset = torch.arange(x_len.max())[None,:,None]
+        diagonal_offset = torch.arange(x_len.max(), device=x.device)[None,:,None]
         ##
         ## positional stuff ##
         positional_grid = causal_mask - cache_offset - diagonal_offset 
-        pos = torch.arange(positional_grid.min(), positional_grid.max()+1).flip(0)[:,None]
+        pos = torch.arange(positional_grid.min(), positional_grid.max()+1, device=x.device, dtype=x.dtype)[:,None]
         min_cache_len = 0 if cache_len.__class__ == int else cache_len.min()
         positional_indices = ((positional_grid*-1) + (total_len.max() - min_cache_len - 1)) # shift so zero is the smallest number
         pos_bias = self.positional_bias(pos=pos, indices=positional_indices, dtype=x.dtype, device=x.device)
