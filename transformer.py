@@ -477,7 +477,35 @@ class transformer_lm(nn.Module):
 
         return  x, interim_logits, cached_kvs
 
+def do_sample(distribution, temperature=1.0):
+    if temperature == 0.0:
+        return torch.argmax(distribution, dim=-1)
 
+    else:
+        return torch.multinomial(distribution, num_samples=1).squeeze(-1)
+
+@torch.no_grad()
+def greedy_generate(model, tokenizer, input_txt, max_len, force_cpu=False, temperature=0.0):
+    model.eval()
+    device = 'cuda' if torch.cuda.is_available() and force_cpu == False else 'cpu'
+    model.to(device)
+    input_ids = [0] + tokenizer.text_to_ids(input_txt)
+    input_ids = torch.tensor(input_ids, device=device).unsqueeze(0)
+    
+    output_tokens = input_ids.squeeze().tolist()
+    cache = None
+    while len(output_tokens) < max_len:
+        logits, _, cache = model(input_ids, cache=cache)
+        print(cache['cache'].shape)
+        logits = logits[:, -1, :]
+        logits = logits[:, 1:] # remove <pad>
+        probs = torch.softmax(logits, dim=-1)
+        next_token = do_sample(probs, temperature=temperature) + 1 # add <pad>
+
+        output_tokens.append(next_token.item())
+        input_ids = next_token.unsqueeze(0)
+    #print(output_tokens)
+    return f'{tokenizer.ids_to_text(output_tokens)}'
 
 class CharacterTokenizer(): # only for testing!
     def __init__(self):
@@ -541,3 +569,5 @@ def caching_test():
 
     assert torch.allclose(fs_cache, cached_kvs_s4['cache'], atol=0.001), 'failed check ): ): ):'
     print('things are looking up !')
+
+
