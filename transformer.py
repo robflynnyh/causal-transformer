@@ -308,8 +308,8 @@ class transformer(nn.Module):
     def get_cache_indices(x_lens, cache_lens, cache_kv, x):  
         # used later w/ gather to remove padding when cache is concatenated with current input to remove padding
         max_new_len = (x_lens + cache_lens).max()
-
-        B, H, N, D = x.shape[0], 1, (x.shape[1] + cache_kv.shape[-2]), cache_kv.shape[-1]
+        # cache kv =  LAYERS, KEYS+VALUES (2), BATCH, HEADS, N, DIM
+        B, H, N, D = x.shape[0], cache_kv.shape[-3], (x.shape[1] + cache_kv.shape[-2]), cache_kv.shape[-1]
         indices = []
         for i in range(B): # stinky for loop to sort out indices for gather 
             cache_indices = torch.arange(cache_lens[i], device='cpu')
