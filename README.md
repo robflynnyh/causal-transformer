@@ -14,9 +14,11 @@ model = transformer_lm(
     shared_kv = True,
 )
 # intermeditate_logits are losses from intermediate layers if intermediate losses is enabled (False by default)
-logits, interimediate_logits, cached_kvs = model(labels, length = length)
+logits, interimediate_logits, cached_kvs = model(labels[t], length = length[t])
+
 # cached_kvs can then be passed back into the model for easy recurrent training or inference
-logits, interimediate_logits, cached_kvs = model(labels, length = length, cache = cached_kvs)
+logits, interimediate_logits, cached_kvs = model(labels[t+1], length = length[t+1], cache = cached_kvs)
+
 # see test function caching_test() for more details
 ```
 
