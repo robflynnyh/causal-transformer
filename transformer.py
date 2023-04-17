@@ -409,7 +409,7 @@ class transformer_lm(nn.Module):
         dropout=0.,
         shared_temperture=True,
         self_conditioning=False,
-        intermediate_loss=True,
+        intermediate_loss=False,
         use_abs_pos=False,
         **kwargs
     ):

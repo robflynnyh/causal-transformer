@@ -1,6 +1,25 @@
 # causal-transformer
 A causal transformer based LM.
 
+Example usage:
+```
+model = transformer_lm(
+    dim = 512,
+    vocab_size = 29,
+    depth = 10,
+    heads = 8,
+    dim_head = 64,
+    dropout=0.0,
+    causal = True,
+    shared_kv = True,
+)
+# intermeditate_logits are losses from intermediate layers if intermediate losses is enabled (False by default)
+logits, interimediate_logits, cached_kvs = model(labels, length = length)
+# cached_kvs can then be passed back into the model for easy recurrent training or inference
+logits, interimediate_logits, cached_kvs = model(labels, length = length, cache = cached_kvs)
+# see test function caching_test() for more details
+```
+
 Currently has the following features:
 - caching previous keys and values for - see test function caching_test() - allows for incremental inference or training like with transformer-xl 
 - coscine similarity based attention (i've found that this works better) https://arxiv.org/abs/2010.04245
