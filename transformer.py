@@ -182,9 +182,12 @@ class CosineAttention(nn.Module):
         kv = torch.stack(kv, dim=0)
         if cache is None:
             return kv
-        zero_vector = torch.zeros_like(kv[:, :, :, :1, :])
-        kv_w_cache = torch.cat([cache, kv, zero_vector], dim=-2)
-        kv_w_cache = torch.gather(kv_w_cache, dim=-2, index=cache_indices) # we do this to remove unnecessary padding
+        if exists(cache_indices):
+            zero_vector = torch.zeros_like(kv[:, :, :, :1, :])
+            kv_w_cache = torch.cat([cache, kv, zero_vector], dim=-2)
+            kv_w_cache = torch.gather(kv_w_cache, dim=-2, index=cache_indices) # we do this to remove unnecessary padding
+        else:
+            kv_w_cache = torch.cat([cache, kv], dim=-2)
         return kv_w_cache
 
     def forward(self, x, pos_bias, mask, cache=None, cache_indices=None):
@@ -247,7 +250,8 @@ class transformer(nn.Module):
         self.causal = causal
 
         self.temperature = nn.Parameter(torch.tensor(temperature), requires_grad=True) if shared_temperture else temperature
-    
+
+        self.cache_needs_gather = False
 
         self.intermediate_loss = intermediate_loss
 
@@ -359,7 +363,7 @@ class transformer(nn.Module):
 
         mask, attn_mask, total_lens, x_len, cache_len, pos_bias = self.create_masks_and_positions(x, length, cache)
     
-        cache_indices = self.get_cache_indices(x_len, cache_len, cache['cache'], x) if exists(cache) else None
+        cache_indices = self.get_cache_indices(x_len, cache_len, cache['cache'], x) if exists(cache) and self.cache_needs_gather else None
     
         for i, (attn, ff) in enumerate(self.layers):
 
@@ -379,6 +383,7 @@ class transformer(nn.Module):
         cached_kvs = torch.stack(cached_kvs, dim=0) if len(cached_kvs) > 0 else None
         cached_kvs = {'cache_lengths': total_lens, 'cache': cached_kvs} if exists(cached_kvs) else None
 
+        self.cache_needs_gather = x_len.max() != x_len.min() # if the lengths are not the same, we need to gather the cache on the next forward pass (if cache is used)
 
         return x, intermediate_logits, cached_kvs
 

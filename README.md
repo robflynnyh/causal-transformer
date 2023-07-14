@@ -16,8 +16,11 @@ model = transformer_lm(
 # intermeditate_logits are losses from intermediate layers if intermediate losses is enabled (False by default)
 logits, interimediate_logits, cached_kvs = model(labels[t], length = length[t])
 
-# cached_kvs can then be passed back into the model for easy recurrent training or inference
+# cached_kvs can then be passed back into the model for easy recurrent training or inference like the tranformer-xl
 logits, interimediate_logits, cached_kvs = model(labels[t+1], length = length[t+1], cache = cached_kvs)
+Unlike any other implementations that I have seen this allows for transformer-xl like training with variable length sequences
+i.e usually it is assumed there is no padding in the cache, which can make it difficult when working with datasets that provide a series of variable length sentences
+as inputs
 
 # see test function caching_test() for more details
 ```
