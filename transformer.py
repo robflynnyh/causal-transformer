@@ -331,7 +331,7 @@ class transformer(nn.Module):
         return indices.to(x.device)
 
     def create_masks_and_positions(self, x, length, cache): 
-        x_len = length if length is not None else torch.tensor(x.shape[-2]).expand(x.shape[0])
+        x_len = length if length is not None else torch.tensor(x.shape[-2], device=x.device).expand(x.shape[0])
         cache_len = cache['cache_lengths'] if exists(cache) else 0
         total_len = x_len + cache_len
         kv_mask = torch.arange(total_len.max(), device=x.device).expand(len(total_len), -1) >= total_len.unsqueeze(-1)
